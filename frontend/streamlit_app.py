@@ -181,7 +181,9 @@ def render_chips(tags: List[str] | None, vibe: str | None, quality: str | None):
     if quality:
         chips.append(f"<span class='chip quality'>quality: {quality}</span>")
     if chips:
-        st.markdown(" ".join(chips), unsafe_allow_html=True)
+        html = "<div class='chip-row'>" + " ".join(chips) + "</div>"
+        html += "<div style='clear:both; height:0;'></div>"
+        st.markdown(html, unsafe_allow_html=True)
 
 
 def posts_grid(items: List[Dict[str, Any]], cols: int = 5):
@@ -204,6 +206,8 @@ def posts_grid(items: List[Dict[str, Any]], cols: int = 5):
             ai = safe_ai(post.get("ai_analysis"))
             show_image(c, thumb)
             c.markdown(f"<div class='card-meta'>❤️ {likes}&nbsp;&nbsp;💬 {comments}</div>", unsafe_allow_html=True)
+            if url:
+                c.markdown(f"[Open ↗]({url})")
             with c.container():
                 render_chips(ai.get("tags"), ai.get("vibe"), (ai.get("quality") or {}).get("label"))
             # Use zero-width spaces to make labels unique without showing an id
@@ -229,11 +233,14 @@ def reels_grid(items: List[Dict[str, Any]], cols: int = 3):
                 break
             post = items[idx]
             thumb = proxied(post.get("thumbnail_src"))
+            url = post.get("post_url")
             likes = format_compact(post.get("likes_count", 0))
             comments = format_compact(post.get("comments_count", 0))
             ai = safe_ai(post.get("ai_analysis"))
             show_image(c, thumb)
             c.markdown(f"<div class='card-meta'>❤️ {likes}&nbsp;&nbsp;💬 {comments}</div>", unsafe_allow_html=True)
+            if url:
+                c.markdown(f"[Open ↗]({url})")
             with c.container():
                 render_chips(ai.get("tags"), ai.get("vibe"), (ai.get("quality") or {}).get("label"))
             zws = "\u200B" * (idx % 7)
