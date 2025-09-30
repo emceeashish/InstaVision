@@ -190,7 +190,6 @@ def posts_grid(items: List[Dict[str, Any]], cols: int = 5):
     if not items:
         st.info("No posts available.")
         return
-    st.session_state["_css_injected"] = False
     rows = (len(items) + cols - 1) // cols
     idx = 0
     for _ in range(rows):
@@ -213,17 +212,16 @@ def posts_grid(items: List[Dict[str, Any]], cols: int = 5):
             # Use zero-width spaces to make labels unique without showing an id
             zws = "\u200B" * (idx % 7)
             label = f"Caption{zws}"
-            with c.expander(label, expanded=False):
+            with c.expander(label, expanded=False, key=f"caption_post_{idx}"):
                 caption = post.get("caption") or "No caption"
                 st.write(caption)
             idx += 1
 
 
-def reels_grid(items: List[Dict[str, Any]], cols: int = 3):
+def reels_grid(items: List[Dict[str, Any]], cols: int = 5):
     if not items:
         st.info("No reels available.")
         return
-    st.session_state["_css_injected"] = False
     rows = (len(items) + cols - 1) // cols
     idx = 0
     for _ in range(rows):
@@ -245,7 +243,7 @@ def reels_grid(items: List[Dict[str, Any]], cols: int = 3):
                 render_chips(ai.get("tags"), ai.get("vibe"), (ai.get("quality") or {}).get("label"))
             zws = "\u200B" * (idx % 7)
             label = f"Caption{zws}"
-            with c.expander(label, expanded=False):
+            with c.expander(label, expanded=False, key=f"caption_reel_{idx}"):
                 caption = post.get("caption") or "No caption"
                 st.write(caption)
             idx += 1
@@ -349,6 +347,6 @@ if view == "Posts":
     posts_grid(images_df.to_dict("records")[:15], cols=5)
 elif view == "Reels":
     reels_df = df_all[df_all["is_video"] == True].sort_values(by="taken_at", ascending=False)
-    reels_grid(reels_df.to_dict("records")[:9], cols=3)
+    reels_grid(reels_df.to_dict("records")[:15], cols=5)
 else:
     analytics_section(df_all)
