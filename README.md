@@ -1,61 +1,99 @@
-## Instagram Influencer Profile - Scraper, AI Analysis, Django API, Streamlit UI
+## Instagram Influencer Insights
 
-### Prerequisites
-- Python 3.10+
-- Windows 10/11 (or macOS/Linux)
-- Recommended: Create a virtualenv
+Scraper + AI/ML analysis + Django REST API + Streamlit UI.
 
-### Setup
-```bash
-setup_venv.bat
+### What this does
+- Scrapes Instagram public profile and recent posts (up to ~20) without login
+- Runs lightweight AI/ML on each post (images + video thumbnails):
+  - Tags (scene, activity, lifestyle, tone, cause, etc.)
+  - Vibe/ambience (casual, cinematic, cozy, etc.)
+  - Quality: BRISQUE score + lighting, visual appeal, consistency
+  - Objects (YOLOv8n)
+- Serves analyzed JSON via a Django REST API
+- Streamlit app to browse profile, posts, reels (thumbnails), and analytics
+
+### Requirements
+- Windows 10/11 (tested), Python 3.10+
+- GPU optional; works on CPU
+- First run downloads ML weights (CLIP, YOLO) – takes a few minutes
+
+### Quick start
+```
+# 1) Install deps
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 2) Run backend (Django)
+run_backend.bat
+# API will be at http://localhost:8000
+
+# 3) Run frontend (Streamlit)
+run_frontend.bat
+# UI at http://localhost:8501
 ```
 
-### Project Structure
+### CLI utilities
 ```
-insta_anal/
-  core/                      # reusable scraping + AI analysis logic
-  scripts/                   # CLI wrappers for manual runs
-  backend/                   # Django + DRF API
-  frontend/                  # Streamlit app
-  instagram_data/            # JSON data output (profile, posts, analyzed)
-```
-
-### Quickstart (CLI)
-```bash
-# Scrape data
+# Scrape profile and posts
 python scripts/scrape.py --username virat.kohli
 
-# Run AI analysis
+# Run AI analysis on scraped data
 python scripts/analyze.py --username virat.kohli
 
-# Or do both
+# Both in one shot
 python scripts/scrape_and_analyze.py --username virat.kohli
 ```
+Analyzed JSON is saved to `instagram_data/<username>_analyzed.json`.
 
-### Run Django API (Windows)
-```bash
-run_backend.bat
+### API endpoints
+- `GET /api/profile/<username>/` – returns profile + (if present) overall analysis summary; triggers AI analysis in background if missing
+- `GET /api/posts/<username>/?limit=N&media_type=image|video` – returns posts array with `ai_analysis` per item; generates analysis on-demand
+
+### Streamlit features
+- Search any username
+- Header metrics: followers, following, posts + avg likes, avg comments, engagement rate
+- Tabs: Posts | Reels | Analytics
+- Per-post chips: tags, vibe, quality label; caption expander per card
+- Analytics charts: likes vs comments, vibe distribution, top tags/objects, quality labels
+
+### Design choices & assumptions
+- No login is used by default. Scraper leverages Instagram’s public web profile endpoint. If an account is private/blocked, scraping fails gracefully.
+- Video analysis uses thumbnails only (fast and reliable). Reels are shown as images; AI works on thumbnails (consistent across profiles and avoids rate limits).
+- Tagging uses CLIP with an expanded vocabulary (scenes, lifestyle, activities, tone, social-cause). It’s zero-shot; we trade a bit of precision for coverage and speed.
+- Quality is a combination of BRISQUE and simple heuristics (lighting/appeal/consistency). It’s meant for ranking/comparison rather than lab-grade scoring.
+- Object detection uses YOLOv8n for speed. It’s conservative (0.5 conf) and returns deduplicated objects.
+
+### Handling missing data
+- Backend: guards for missing keys/fields; returns 502 with a helpful message if scrape fails
+- Frontend: robust to NaN/None – `ai_analysis` is safely coerced; no crashes if columns are missing
+- If first request takes long (model downloads), Streamlit timeouts are increased
+
+### Troubleshooting
+- First-run slow: allow time for model/weights download
+- Private/blocked profiles: API returns a friendly error; try another username
+- Streamlit errors like `segmented_control` or image width:
+  - The app falls back to a radio switcher and handles older Streamlit APIs automatically
+- If you see “float has no attribute get”: pull latest; frontend now guards `ai_analysis` properly
+
+### Project structure
 ```
-Then open `http://localhost:8000/api/profile/virat.kohli/` or `http://localhost:8000/api/posts/virat.kohli/`.
-
-If analyzed data does not exist, the API will scrape + analyze on-demand (first request may take time to download models and run inference).
-
-### Run Streamlit UI (Windows)
-```bash
-run_frontend.bat
+insta_anal/
+  backend/            # Django + DRF API
+  core/               # Scraper and AI analysis
+  frontend/           # Streamlit UI
+  scripts/            # CLI wrappers
+  instagram_data/     # JSON outputs
 ```
-Then open `http://localhost:8501` in your browser.
 
-- Enter any Instagram username.
-- The app fetches `profile` and `posts` from the Django API and displays:
-  - Profile card (followers, following, posts, bio, profile picture)
-  - Last 10 posts (images)
-  - Last 5 reels (videos)
-  - AI analysis tags, vibe, quality, objects, events per item
-  - Charts for likes vs comments, vibe distribution, top tags/objects, quality labels
+### Security and rate limits
+- No credentials stored; public-only scraping
+- Respectful pacing and limited post count
+- Avoids aggressive video fetching; uses thumbnails for reliability
 
-### Notes
-- Heavy ML models (CLIP, YOLO) will download on the first run.
-- If video URLs are not directly available, analysis falls back to thumbnails.
-- Data is stored under `instagram_data/` as `<username>_profile.json`, `<username>_posts.json`, and `<username>_analyzed.json`.
-- For private or blocked accounts, scraping may fail and API will return an error with details.
+### Roadmap (nice-to-have)
+- Account-level historical engagement trends
+- Per-post detail route/page inside Streamlit
+- Export CSV of analytics
+
+### License
+MIT (feel free to adapt for your own research/portfolio)
