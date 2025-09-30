@@ -1,14 +1,14 @@
 # Core runtime
 requests==2.32.3
 pillow==10.4.0
-numpy<2.0.0,>=1.23.0
+numpy>=1.23.0,<2.0.0
 
-# AI/ML (used in core/ai_pipeline.py)
-torch>=2.2.0
+# AI/ML
+torch>=2.6,<2.9
 transformers==4.44.2
 ultralytics==8.2.100
 piq==0.8.0
-opencv-python==4.10.0.84
+opencv-python-headless==4.10.0.84
 
 # Utils
 tqdm==4.66.5
