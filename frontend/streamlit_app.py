@@ -181,11 +181,7 @@ def render_chips(tags: List[str] | None, vibe: str | None, quality: str | None):
     if quality:
         chips.append(f"<span class='chip quality'>quality: {quality}</span>")
     if chips:
-        # Wrap chips in a block-level div and add a clearing element to force next content below
-        html = "<div class='chip-row'>" + " ".join(chips) + "</div>"
-        html += "<div style='clear:both; height:0;'></div>"
-        st.markdown(html, unsafe_allow_html=True)
-
+        st.markdown(" ".join(chips), unsafe_allow_html=True)
 
 
 def posts_grid(items: List[Dict[str, Any]], cols: int = 5):
