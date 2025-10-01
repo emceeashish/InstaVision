@@ -5,7 +5,6 @@ import numpy as np
 import plotly.express as px
 import streamlit as st
 from typing import Dict, Any, List
-from st_social_media_links import SocialMediaIcons
 
 
 st.set_page_config(page_title="Instagram Influencer Insights", layout="wide")
