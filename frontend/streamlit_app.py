@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 
 st.set_page_config(page_title="Instagram Influencer Insights", layout="wide")
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://instavision-1.onrender.com/")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://instavision-1.onrender.com")
 
 
 def proxied(url: str | None) -> str | None:
