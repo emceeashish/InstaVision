@@ -412,6 +412,7 @@ def analytics_section(df: pd.DataFrame):
 st.sidebar.header("Influencer Lookup")
 username_input = st.sidebar.text_input("Instagram username", value=st.session_state.get("username", ""))
 fetch_clicked = st.sidebar.button("Fetch data")
+st.sidebar.caption("e.g., whybhanshu")
 
 if fetch_clicked and username_input:
     st.session_state["username"] = username_input.strip()
