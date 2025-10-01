@@ -10,7 +10,7 @@ from st_social_media_links import SocialMediaIcons
 
 st.set_page_config(page_title="Instagram Influencer Insights", layout="wide")
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://ashish.be.com")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/")
 
 
 def proxied(url: str | None) -> str | None:

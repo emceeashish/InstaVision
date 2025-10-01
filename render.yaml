@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: insta-anal-backend
+    env: python
+    rootDir: backend
+    buildCommand: pip install --no-cache-dir -r ../requirements.txt
+    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --threads 1 --timeout 120
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings
+      - key: ALLOW_AUTODOWNLOAD
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
+        value: "1"
+      - key: OPENCV_OPENCL_RUNTIME
+        value: "disabled"
+      - key: YOLOV8_ONNX_PATH
+        value: ../models/yolov8n_int8.onnx
+      - key: BRISQUE_MODEL_PATH
+        value: ../models/brisque_model_live.yml
+      - key: BRISQUE_RANGE_PATH
+        value: ../models/brisque_range_live.yml
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/instagram_data
+      sizeGB: 1
+

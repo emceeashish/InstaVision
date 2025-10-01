@@ -3,16 +3,14 @@ import os
 import requests
 from PIL import Image
 from io import BytesIO
-import torch
-from transformers import CLIPProcessor, CLIPModel
-from ultralytics import YOLO
-from piq import brisque
 import cv2
 import numpy as np
 from tqdm import tqdm
 import tempfile
 import re
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
+import onnxruntime as ort
+import pathlib
 
 
 def safe_filename_from_url(url: str) -> str:
@@ -88,60 +86,251 @@ def extract_keyframes_opencv(
 
 
 class InstagramAIAnalyzer:
-    def __init__(self, device: str | None = None, clip_model_id: str = "openai/clip-vit-base-patch32"):
-        print("Initializing AI Models...")
+    def __init__(self, device: str | None = None, clip_model_id: str | None = None):
+        print("Initializing lightweight AI pipeline...")
+        # Minimize CPU thread usage and memory for cv2/NumPy/ONNXRuntime on Render free plan
+        try:
+            cv2.setNumThreads(1)
+        except Exception:
+            pass
+        try:
+            cv2.ocl.setUseOpenCL(False)
+        except Exception:
+            pass
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
+        # Detection thresholds (tunable via env)
+        self.det_conf_thresh: float = float(os.getenv("DET_CONF_THRESH", "0.25"))
+        self.det_iou_thresh: float = float(os.getenv("DET_IOU_THRESH", "0.45"))
+        self.allow_autodownload: bool = os.getenv("ALLOW_AUTODOWNLOAD", "1") not in ("0", "false", "False")
 
-        self.clip_model = CLIPModel.from_pretrained(clip_model_id).to(self.device)
-        self.clip_model.eval()
-        self.clip_processor = CLIPProcessor.from_pretrained(clip_model_id)
-
-        self.yolo_model = YOLO("yolov8n.pt")
-
-        # Expanded categories for better coverage
-        self.base_tag_categories = [
-            # Scenes & settings
-            "city skyline","street style","indoor room","studio backdrop","beach","mountains","forest","cafe","gym",
-            # People & portraits
-            "selfie","portrait","group photo","close-up","full body","candid","smile",
-            # Fashion & lifestyle
-            "fashion","outfit","makeup","accessories","watch","sunglasses","footwear","bag","luxury",
-            # Activities & sports
-            "travel","hiking","running","workout","dance","performance","party","wedding","graduation",
-            # Food & objects
-            "food","dessert","coffee","technology","gadget","car","motorcycle","animal","pet",
-            # Art & media
-            "art","painting","poster","music","microphone","stage",
-            # Tone & purpose
-            "minimalist","aesthetic","brand promo","product showcase","behind the scenes",
-            # Social causes
-            "charity","volunteer","ngo","community aid","relief","rescue","donation","awareness",
-        ]
-        self.vibe_categories = [
-            "casual everyday","aesthetic artistic","luxury lavish","energetic dynamic","calm peaceful","dark moody",
-            "bright vibrant","professional","party celebration","romantic","adventure","minimalist",
-            "nostalgic","cinematic","warm cozy","cool modern"
-        ]
-        self.video_event_categories = [
-            "person dancing","people talking","car moving","beach scene","city walking","eating food","working out","singing",
-            "playing sports","driving","party celebration","performance","shopping","cooking food","traveling","celebrating"
+        # COCO class names (80 classes)
+        self.coco_classes: List[str] = [
+            "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light",
+            "fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow",
+            "elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
+            "skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle",
+            "wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange",
+            "broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed",
+            "dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven",
+            "toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
         ]
 
-        def prompt_labels(labels, template="This is a photo of a {}."):
-            return [template.format(l) for l in labels]
+        # Try to initialize ONNX Runtime YOLOv8n INT8 session
+        self.ort_session: Optional[ort.InferenceSession] = None
+        self._onnx_input_name: Optional[str] = None
+        self._onnx_img_size: int = int(os.getenv("YOLOV8_ONNX_INPUT", "640"))
+        models_dir = os.path.join("models")
+        os.makedirs(models_dir, exist_ok=True)
+        yolo_path = os.getenv("YOLOV8_ONNX_PATH", os.path.join(models_dir, "yolov8n_int8.onnx"))
+        if not os.path.exists(yolo_path) and self.allow_autodownload:
+            # If INT8 not provided, fallback to FP32 yolov8n.onnx from Ultralytics assets
+            fallback_yolo = os.path.join(models_dir, "yolov8n.onnx")
+            yolo_url = os.getenv("YOLOV8_ONNX_URL", "https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx")
+            try:
+                self._download_file(yolo_url, fallback_yolo, max_mb=30)
+                yolo_path = fallback_yolo
+                print(f"Downloaded YOLO ONNX to {yolo_path}")
+            except Exception as e:
+                print(f"Autodownload YOLO ONNX failed: {e}")
 
-        self.tag_prompts = prompt_labels(self.base_tag_categories, "This is a photo of {}.")
-        self.vibe_prompts = prompt_labels(self.vibe_categories, "This is a photo with a {} vibe.")
-        self.event_prompts = prompt_labels(self.video_event_categories, "This is a video frame of {}.")
+        if os.path.exists(yolo_path):
+            try:
+                self._init_onnx_session(yolo_path)
+                print("ONNX Runtime YOLOv8 session initialized")
+            except Exception as e:
+                print(f"Failed to init ONNX Runtime session: {e}")
+        else:
+            print(f"YOLO ONNX model not found at {yolo_path}. Object tags/objects will be empty.")
 
-        self.tag_text_inputs = self.clip_processor(text=self.tag_prompts, return_tensors="pt", padding=True).to(self.device)
-        self.vibe_text_inputs = self.clip_processor(text=self.vibe_prompts, return_tensors="pt", padding=True).to(self.device)
-        self.event_text_inputs = self.clip_processor(text=self.event_prompts, return_tensors="pt", padding=True).to(self.device)
+        # Optional OpenCV DNN SSD MobileNet fallback
+        self.cv_dnn: Optional[cv2.dnn_DetectionModel] = None
+        ssd_model = os.getenv("OPENCV_SSD_MODEL_PATH", "")
+        ssd_cfg = os.getenv("OPENCV_SSD_CONFIG_PATH", "")
+        if not self.ort_session and ssd_model and ssd_cfg and os.path.exists(ssd_model) and os.path.exists(ssd_cfg):
+            try:
+                net = cv2.dnn.readNetFromTensorflow(ssd_model, ssd_cfg)
+                model = cv2.dnn_DetectionModel(net)
+                model.setInputSize(320, 320)
+                model.setInputScale(1.0 / 127.5)
+                model.setInputMean((127.5, 127.5, 127.5))
+                model.setInputSwapRB(True)
+                self.cv_dnn = model
+                print("OpenCV DNN SSD fallback initialized")
+            except Exception as e:
+                print(f"Failed to init OpenCV DNN SSD: {e}")
 
-        print(f"AI Models loaded on {self.device}!")
+        # BRISQUE model paths (optional)
+        self.brisque_model_path = os.getenv("BRISQUE_MODEL_PATH", os.path.join(models_dir, "brisque_model_live.yml"))
+        self.brisque_range_path = os.getenv("BRISQUE_RANGE_PATH", os.path.join(models_dir, "brisque_range_live.yml"))
+        if not (os.path.exists(self.brisque_model_path) and os.path.exists(self.brisque_range_path)):
+            if self.allow_autodownload:
+                try:
+                    self._download_file(
+                        os.getenv(
+                            "BRISQUE_MODEL_URL",
+                            "https://raw.githubusercontent.com/opencv/opencv_contrib/4.x/modules/quality/samples/brisque_model_live.yml"
+                        ),
+                        self.brisque_model_path,
+                        max_mb=2,
+                    )
+                    self._download_file(
+                        os.getenv(
+                            "BRISQUE_RANGE_URL",
+                            "https://raw.githubusercontent.com/opencv/opencv_contrib/4.x/modules/quality/samples/brisque_range_live.yml"
+                        ),
+                        self.brisque_range_path,
+                        max_mb=2,
+                    )
+                except Exception as e:
+                    print(f"Autodownload BRISQUE assets failed: {e}")
+        if not (os.path.exists(self.brisque_model_path) and os.path.exists(self.brisque_range_path)):
+            # If still not present, heuristics will be used
+            self.brisque_model_path = None
+            self.brisque_range_path = None
+        print("Lightweight AI ready!")
+
+    def _init_onnx_session(self, model_path: str):
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = 1
+        so.inter_op_num_threads = 1
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        providers = ["CPUExecutionProvider"]
+        self.ort_session = ort.InferenceSession(model_path, sess_options=so, providers=providers)
+        self._onnx_input_name = self.ort_session.get_inputs()[0].name
+
+    def _download_file(self, url: str, dst_path: str, timeout: int = 30, max_mb: int | None = None) -> None:
+        os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+        resp = requests.get(url, stream=True, timeout=timeout)
+        resp.raise_for_status()
+        size = 0
+        with open(dst_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                size += len(chunk)
+                if max_mb is not None and size > max_mb * 1024 * 1024:
+                    raise RuntimeError(f"Download exceeded {max_mb} MB limit")
+        # Basic sanity check
+        if os.path.getsize(dst_path) == 0:
+            raise RuntimeError("Downloaded file is empty")
+
+    def _letterbox(self, img: np.ndarray, new_size: int = 640, color: Tuple[int, int, int] = (114, 114, 114)) -> Tuple[np.ndarray, float, Tuple[int, int]]:
+        h, w = img.shape[:2]
+        r = min(new_size / h, new_size / w)
+        nh, nw = int(round(h * r)), int(round(w * r))
+        resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        top = (new_size - nh) // 2
+        bottom = new_size - nh - top
+        left = (new_size - nw) // 2
+        right = new_size - nw - left
+        padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        return padded, r, (left, top)
+
+    def _nms(self, boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> List[int]:
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+        areas = (x2 - x1) * (y2 - y1)
+        order = scores.argsort()[::-1]
+        keep: List[int] = []
+        while order.size > 0:
+            i = int(order[0])
+            keep.append(i)
+            if order.size == 1:
+                break
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+            w = np.maximum(0.0, xx2 - xx1)
+            h = np.maximum(0.0, yy2 - yy1)
+            inter = w * h
+            iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-6)
+            inds = np.where(iou <= iou_thr)[0]
+            order = order[inds + 1]
+        return keep
+
+    def _detect_with_onnx(self, image: Image.Image, conf: Optional[float] = None) -> List[Tuple[str, float]]:
+        if not self.ort_session:
+            return []
+        conf_thr = float(conf if conf is not None else self.det_conf_thresh)
+        img = np.asarray(image)
+        if img.ndim == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        size = self._onnx_img_size
+        padded, r, (left, top) = self._letterbox(img, new_size=size)
+        padded_rgb = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)
+        inp = padded_rgb.astype(np.float32) / 255.0
+        inp = np.transpose(inp, (2, 0, 1))[None, ...]
+        outputs = self.ort_session.run(None, {self._onnx_input_name: inp})
+        pred = outputs[0]
+        if pred.ndim == 3:
+            pred = np.squeeze(pred, axis=0)
+        # Expected shapes: (8400, 84) or (84, 8400)
+        if pred.shape[0] in (84, 85):
+            pred = pred.transpose(1, 0)
+        # Now pred shape: (num, 84/85)
+        num_classes = pred.shape[1] - 4
+        boxes = pred[:, :4]
+        if boxes.max() <= 1.5:
+            # If center format (cx, cy, w, h)
+            cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+            x1 = cx - bw / 2
+            y1 = cy - bh / 2
+            x2 = cx + bw / 2
+            y2 = cy + bh / 2
+            boxes = np.stack([x1, y1, x2, y2], axis=1)
+        cls_scores = pred[:, 4:4 + num_classes]
+        scores = cls_scores.max(axis=1)
+        cls_ids = cls_scores.argmax(axis=1)
+        mask = scores >= conf_thr
+        boxes = boxes[mask]
+        scores = scores[mask]
+        cls_ids = cls_ids[mask]
+        if boxes.size == 0:
+            return []
+        # Scale boxes back to original image
+        boxes[:, [0, 2]] -= left
+        boxes[:, [1, 3]] -= top
+        boxes /= r
+        boxes[:, 0::2] = np.clip(boxes[:, 0::2], 0, img.shape[1])
+        boxes[:, 1::2] = np.clip(boxes[:, 1::2], 0, img.shape[0])
+        keep = self._nms(boxes, scores, self.det_iou_thresh)
+        names: List[Tuple[str, float]] = []
+        for i in keep:
+            cid = int(cls_ids[i])
+            name = self.coco_classes[cid] if 0 <= cid < len(self.coco_classes) else str(cid)
+            names.append((name, float(scores[i])))
+        return names
+
+    def _detect_with_opencv_ssd(self, image: Image.Image, conf: Optional[float] = None) -> List[Tuple[str, float]]:
+        if not self.cv_dnn:
+            return []
+        conf_thr = float(conf if conf is not None else self.det_conf_thresh)
+        img = np.asarray(image)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        classes, scores, boxes = self.cv_dnn.detect(img, confThreshold=conf_thr, nmsThreshold=self.det_iou_thresh)
+        results: List[Tuple[str, float]] = []
+        for cid, score in zip(classes.flatten().tolist(), scores.flatten().tolist()):
+            idx = int(cid) - 1  # SSD labels often start at 1
+            name = self.coco_classes[idx] if 0 <= idx < len(self.coco_classes) else str(idx)
+            results.append((name, float(score)))
+        return results
+
+    def detect_objects_tags(self, image: Image.Image, conf: float = 0.35) -> List[str]:
+        try:
+            dets = self._detect_with_onnx(image, conf=conf)
+            if not dets:
+                dets = self._detect_with_opencv_ssd(image, conf=conf)
+            names = sorted(set([n for n, s in dets]))
+            return names
+        except Exception as e:
+            print(f"Error in object detection: {e}")
+            return []
 
     def download_image(self, url):
         try:
@@ -154,76 +343,108 @@ class InstagramAIAnalyzer:
             print(f"Error downloading image: {e}")
             return None
 
-    @torch.no_grad()
-    def _clip_probs_from_prompts(self, image: Image.Image, text_inputs, image_size: int = 384):
-        pixel_inputs = self.clip_processor(images=image, return_tensors="pt", do_resize=True, size=image_size).to(self.device)
-        outputs = self.clip_model(input_ids=text_inputs["input_ids"], attention_mask=text_inputs["attention_mask"], pixel_values=pixel_inputs["pixel_values"])
-        probs = outputs.logits_per_image.softmax(dim=1)
-        return probs[0].detach().cpu()
-
-    def _select_multilabel(self, probs: torch.Tensor, labels: list[str], threshold: float = 0.18, top_k_fallback: int = 7):
-        idx = (probs >= threshold).nonzero(as_tuple=True)[0].tolist()
-        if not idx:
-            idx = probs.topk(top_k_fallback).indices.tolist()
-        return [labels[i] for i in idx]
-
     def _get_clip_tags(self, image: Image.Image, threshold: float = 0.18):
-        probs = self._clip_probs_from_prompts(image, self.tag_text_inputs)
-        return self._select_multilabel(probs, self.base_tag_categories, threshold=threshold, top_k_fallback=7)
+        # Backward-compatible wrapper: returns object detection tags
+        conf = max(min(threshold, 0.9), 0.01)
+        return self.detect_objects_tags(image, conf=conf)
+
+    def rule_based_vibe(self, image: Image.Image) -> str:
+        try:
+            arr = np.asarray(image)
+            hsv = cv2.cvtColor(arr, cv2.COLOR_RGB2HSV)
+            h, s, v = cv2.split(hsv)
+            s_mean = float(np.mean(s))
+            v_mean = float(np.mean(v))
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+            if v_mean < 80:
+                return "dark moody"
+            if v_mean > 170 and s_mean > 100:
+                return "bright vibrant"
+            if s_mean < 60 and 90 <= v_mean <= 170:
+                return "minimalist"
+            if lap_var > 700 and s_mean > 80:
+                return "energetic dynamic"
+            return "calm peaceful"
+        except Exception:
+            return "minimalist"
 
     def _get_clip_vibe(self, image: Image.Image):
-        probs = self._clip_probs_from_prompts(image, self.vibe_text_inputs)
-        return self.vibe_categories[int(probs.argmax())]
-
-    def _get_clip_events(self, image: Image.Image, threshold: float = 0.20):
-        probs = self._clip_probs_from_prompts(image, self.event_text_inputs)
-        return self._select_multilabel(probs, self.video_event_categories, threshold=threshold, top_k_fallback=3)
+        return self.rule_based_vibe(image)
 
     def _get_quality_details(self, image: Image.Image):
-        # Base BRISQUE score
+        # Option A: OpenCV BRISQUE (requires opencv-contrib and model/range files)
+        score: float = 0.0
+        label: str = "unknown"
+        used_brisque = False
         try:
-            arr = np.asarray(image).astype(np.float32) / 255.0
-            tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
-            score = float(brisque(tensor, data_range=1.0))
-            if score < 20:
-                label = "excellent"
-            elif score < 40:
-                label = "good"
-            elif score < 60:
-                label = "average"
-            else:
-                label = "poor"
+            if self.brisque_model_path and self.brisque_range_path and hasattr(cv2, "quality"):
+                arr = np.asarray(image)
+                # BRISQUE expects BGR
+                bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                try:
+                    # Newer API (create + compute)
+                    brq = cv2.quality.QualityBRISQUE_create(self.brisque_model_path, self.brisque_range_path)
+                    score = float(brq.compute(bgr)[0])
+                    used_brisque = True
+                except Exception:
+                    # Static API fallback
+                    s = cv2.quality.QualityBRISQUE_compute(bgr, self.brisque_model_path, self.brisque_range_path)
+                    score = float(s[0] if isinstance(s, (list, tuple, np.ndarray)) else s)
+                    used_brisque = True
+            if used_brisque:
+                if score < 20:
+                    label = "excellent"
+                elif score < 40:
+                    label = "good"
+                elif score < 60:
+                    label = "average"
+                else:
+                    label = "poor"
         except Exception as e:
-            print(f"Error in quality assessment: {e}")
-            score, label = 0.0, "unknown"
+            print(f"BRISQUE failed: {e}")
+            used_brisque = False
 
-        # Heuristics for lighting/appeal/consistency using simple image stats
+        # Option B: Heuristics fallback
         try:
             gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
             brightness = float(np.mean(gray))
             contrast = float(np.std(gray))
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+            if not used_brisque:
+                # Compose a simple score (lower is better to mimic BRISQUE style)
+                # Scale components to comparable ranges
+                inv_sharp = max(0.0, 1000.0 - min(lap_var, 1000.0)) / 10.0
+                mid_brightness_penalty = abs(brightness - 128.0) / 3.0
+                low_contrast_penalty = max(0.0, 50.0 - min(contrast, 50.0))
+                score = float(inv_sharp + mid_brightness_penalty + low_contrast_penalty)
+                if score < 20:
+                    label = "excellent"
+                elif score < 40:
+                    label = "good"
+                elif score < 60:
+                    label = "average"
+                else:
+                    label = "poor"
+
             lighting = "well-lit" if brightness > 140 else "dim" if brightness < 80 else "balanced"
-            appeal = "high" if (label in ["excellent","good"] and contrast > 50) else "medium" if contrast > 30 else "low"
-            # Consistency proxy: edge density
+            appeal = "high" if (label in ["excellent", "good"] and contrast > 45) else "medium" if contrast > 25 else "low"
             edges = cv2.Canny(gray, 100, 200)
             edge_density = float(edges.mean())
             consistency = "clean" if edge_density < 10 else "detailed" if edge_density < 25 else "busy"
         except Exception:
-            lighting, appeal, consistency = "unknown","unknown","unknown"
+            lighting, appeal, consistency = "unknown", "unknown", "unknown"
 
-        return {"score": score, "label": label, "lighting": lighting, "visual_appeal": appeal, "consistency": consistency}
+        return {"score": float(score), "label": label, "lighting": lighting, "visual_appeal": appeal, "consistency": consistency}
 
     def _get_objects(self, image: Image.Image, conf: float = 0.5):
         try:
-            results = self.yolo_model.predict(image, conf=conf, verbose=False)
-            objects: List[str] = []
-            for res in results:
-                names = res.names
-                for box in res.boxes:
-                    if float(box.conf[0]) >= conf:
-                        cls = int(box.cls[0])
-                        objects.append(names.get(cls, str(cls)))
-            return sorted(set(objects))
+            dets = self._detect_with_onnx(image, conf=conf)
+            if not dets:
+                dets = self._detect_with_opencv_ssd(image, conf=conf)
+            return sorted(set([n for n, s in dets]))
         except Exception as e:
             print(f"Error in object detection: {e}")
             return []
